@@ -1,4 +1,4 @@
-name: ${{values.app_name}}-cicd
+name: ${{ values.app_name }}-cicd
 
 on:
   push:
@@ -11,23 +11,22 @@ jobs:
   ci:
     runs-on: ubuntu-latest
     steps:
-
       - name: Shorten commit id
         shell: bash
         run: |
           echo "COMMIT_ID=${GITHUB_SHA::6}" >> "$GITHUB_ENV"
-      -
-        name: Login to Docker Hub
+      
+      - name: Login to Docker Hub
         uses: docker/login-action@v3
         with:
           username: ${{ '${{ secrets.DOCKERHUB_USERNAME }}' }}
           password: ${{ '${{ secrets.DOCKERHUB_TOKEN }}' }}
-      -
-        name: Build and push
+      
+      - name: Build and push
         uses: docker/build-push-action@v6
         with:
           push: true
-          tags: obilotiti/${{values.app_name}}:${{ '${{ env.COMMIT_ID }}' }}
+          tags: obilotiti/${{ values.app_name }}:${{ '${{ env.COMMIT_ID }}' }}
     outputs:
       commit_id: ${{ '${{ env.COMMIT_ID }}' }}
 
@@ -35,58 +34,79 @@ jobs:
     needs: ci
     runs-on: self-hosted
     steps:
-
       - uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # Fetch all history for git operations
 
       - name: Modify values file
         shell: bash
         run: |
-          echo ${{ '${{needs.ci.outputs.commit_id}}' }}
-          pip install yq
-          yq -Yi '.image.tag = "${{'${{needs.ci.outputs.commit_id}}' }}"' charts/${{values.app_name}}/values-${{values.app_env}}.yaml
+          echo ${{ '${{ needs.ci.outputs.commit_id }}' }}
+          # Install yq if not already available
+          if ! command -v yq &> /dev/null; then
+            pip install yq
+          fi
+          yq -Yi '.image.tag = "${{ '${{ needs.ci.outputs.commit_id }}' }}"' charts/${{ values.app_name }}/values-${{ values.app_env }}.yaml
 
       - name: Commit changes
         uses: EndBug/add-and-commit@v9
         with:
-          message: 'Updates values.yaml with commit ${{ '${{needs.ci.outputs.commit_id}}' }}'
+          message: 'Updates values.yaml with commit ${{ '${{ needs.ci.outputs.commit_id }}' }}'
+          pull: true  # Pull latest changes before committing
+          pull_strategy: merge  # Handle merge conflicts
 
-      - name: Install argocd
+      - name: Install argocd CLI
         shell: bash
         run: |
-          curl -ksSL -o argocd https://argocd-server.argocd/download/argocd-linux-amd64
+          # Download ArgoCD CLI from official source
+          curl -sSL -o argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
           chmod +x argocd
-          sudo mv ./argocd /usr/local/bin/argocd
+          sudo mv argocd /usr/local/bin/
 
       - name: argocd login
         shell: bash
         run: |
-          argocd login argocd-server.argocd \
-            --insecure  \
-            --grpc-web \
-            --username admin \
-            --password  ${{ '${{ secrets.ARGOCD_PASSWORD }}' }}
+          # Try to discover ArgoCD server address
+          if kubectl get svc argocd-server -n argocd &> /dev/null; then
+            # Use in-cluster service
+            argocd login argocd-server.argocd.svc.cluster.local \
+              --insecure \
+              --grpc-web \
+              --username admin \
+              --password ${{ '${{ secrets.ARGOCD_PASSWORD }}' }}
+          else
+            # Fallback to external access
+            argocd login argocd-server.argocd \
+              --insecure \
+              --grpc-web \
+              --username admin \
+              --password ${{ '${{ secrets.ARGOCD_PASSWORD }}' }}
+          fi
 
       - name: Ensure argocd repo and app
         shell: bash
         run: |
-
           # Connects the argocd repo
-          repo="https://github.com/obilotiti-com/${{values.app_name}}.git"
-          argocd repo list | grep -q $repo || argocd repo add $repo
+          repo="https://github.com/obilotiti-com/${{ values.app_name }}.git"
+          if ! argocd repo list | grep -q "$repo"; then
+            argocd repo add "$repo"
+          fi
 
-          # Creates the argocd app
-          argocd app get ${{values.app_name}} || argocd app create ${{values.app_name}} \
-            --repo $repo \
-            --path charts/${{values.app_name}} \
-            --dest-namespace ${{values.app_env}} \
-            --dest-server https://kubernetes.default.svc \
-            --values values-${{values.app_env}}.yaml \
-            --revision master \
-            --sync-policy manual \
-            --sync-option CreateNamespace=true
+          # Creates the argocd app if it doesn't exist
+          if ! argocd app get "${{ values.app_name }}"; then
+            argocd app create "${{ values.app_name }}" \
+              --repo "$repo" \
+              --path "charts/${{ values.app_name }}" \
+              --dest-namespace "${{ values.app_env }}" \
+              --dest-server "https://kubernetes.default.svc" \
+              --values "values-${{ values.app_env }}.yaml" \
+              --revision master \
+              --sync-policy manual \
+              --sync-option CreateNamespace=true
+          fi
 
       - name: Argocd app sync
         shell: bash
         run: |
-          argocd app sync ${{values.app_name}}
-          argocd app wait ${{values.app_name}} --timeout 180
+          argocd app sync "${{ values.app_name }}"
+          argocd app wait "${{ values.app_name }}" --timeout 180
