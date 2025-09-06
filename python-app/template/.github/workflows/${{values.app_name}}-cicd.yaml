@@ -46,6 +46,14 @@ jobs:
           # use your org PAT so the working copy is writable
           token: ${{ '${{ secrets.AUTH_GITHUB_TOKEN }}' }}
 
+      - name: Install kubectl
+        shell: bash
+        run: |
+          # Install kubectl
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/
+
       - name: Modify values file
         shell: bash
         run: |
@@ -82,51 +90,36 @@ jobs:
           kubectl cluster-info
           kubectl get pods -n argocd
 
-      - name: argocd login with service account token
-        env:
-          ARGOCD_AUTH_TOKEN: ${{ '${{ secrets.ARGOCD_AUTH_TOKEN }}' }}
+      - name: argocd login
         shell: bash
         run: |
-          # Use the service account token for in-cluster authentication
-          if [ -n "$ARGOCD_AUTH_TOKEN" ]; then
-            echo "Using auth token for ArgoCD login"
-            argocd login argocd-server.argocd.svc.cluster.local \
-              --insecure \
-              --grpc-web \
-              --auth-token "$ARGOCD_AUTH_TOKEN" \
-              --skip-test-tls
-          else
-            echo "ERROR: ARGOCD_AUTH_TOKEN secret is required"
-            exit 1
-          fi
+          argocd login argocd-server.argocd \
+            --insecure  \
+            --grpc-web \
+            --username admin \
+            --password  ${{ '${{ secrets.ARGOCD_PASSWORD }}' }}
 
       - name: Ensure argocd repo and app
-        env:
-          GH_PAT: ${{ '${{ secrets.AUTH_GITHUB_TOKEN }}' }}
         shell: bash
         run: |
+
           # Connects the argocd repo
-          repo="https://github.com/obilotiti-com/${{ values.app_name }}.git"
-          # If private, add with GitHub token so ArgoCD can pull
-          if ! argocd repo list | grep -q "$repo"; then
-            argocd repo add "$repo" --username x-access-token --password "$GH_PAT"
-          fi
+          repo="https://github.com/obilotiti-com/${{values.app_name}}.git"
+          argocd repo list | grep -q $repo || argocd repo add $repo
 
           # Creates the argocd app
-          if ! argocd app get ${{ values.app_name }}; then
-            argocd app create ${{ values.app_name }} \
-              --repo "$repo" \
-              --path charts/${{ values.app_name }} \
-              --dest-namespace ${{ values.app_env }} \
-              --dest-server https://kubernetes.default.svc \
-              --values values-${{ values.app_env }}.yaml \
-              --revision master \
-              --sync-policy manual \
-              --sync-option CreateNamespace=true
-          fi
+          argocd app get ${{values.app_name}} || argocd app create ${{values.app_name}} \
+            --repo $repo \
+            --path charts/${{values.app_name}} \
+            --dest-namespace ${{values.app_env}} \
+            --dest-server https://kubernetes.default.svc \
+            --values values-${{values.app_env}}.yaml \
+            --revision master \
+            --sync-policy manual \
+            --sync-option CreateNamespace=true
 
       - name: Argocd app sync
         shell: bash
         run: |
-          argocd app sync ${{ values.app_name }}
-          argocd app wait ${{ values.app_name }} --timeout 180
+          argocd app sync ${{values.app_name}}
+          argocd app wait ${{values.app_name}} --timeout 180
