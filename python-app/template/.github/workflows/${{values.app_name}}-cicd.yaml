@@ -7,6 +7,10 @@ on:
     branches:
       - master
 
+# allow pushing from the self-hosted runner
+permissions:
+  contents: write
+
 jobs:
   ci:
     runs-on: ubuntu-latest
@@ -36,18 +40,33 @@ jobs:
     steps:
 
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: master
+          # use your org PAT so the working copy is writable
+          token: ${{ '${{ secrets.AUTH_GITHUB_TOKEN }}' }}
 
       - name: Modify values file
         shell: bash
         run: |
-          echo ${{ '${{needs.ci.outputs.commit_id}}' }}
-          pip install yq
-          yq -Yi '.image.tag = "${{'${{needs.ci.outputs.commit_id}}' }}"' charts/${{values.app_name}}/values-${{values.app_env}}.yaml
+          echo ${{ '${{ needs.ci.outputs.commit_id }}' }}
+          # Use Mike Farah yq (supports -i). Avoid the Python yq wrapper.
+          if ! command -v yq >/dev/null 2>&1; then
+            sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+            sudo chmod +x /usr/local/bin/yq
+          fi
+          TAG=${{ '${{ needs.ci.outputs.commit_id }}' }}
+          yq -i ".image.tag = \"${TAG}\"" charts/${{ values.app_name }}/values-${{ values.app_env }}.yaml
 
       - name: Commit changes
         uses: EndBug/add-and-commit@v9
         with:
-          message: 'Updates values.yaml with commit ${{ '${{needs.ci.outputs.commit_id}}' }}'
+          add: charts/${{ values.app_name }}/values-${{ values.app_env }}.yaml
+          message: "Updates values.yaml with commit ${{ '${{ needs.ci.outputs.commit_id }}' }}"
+          default_author: github_actions
+          pull: "--rebase --autostash"
+          push: true
+          branch: master
 
       - name: Install argocd
         shell: bash
@@ -57,6 +76,9 @@ jobs:
           sudo mv argocd /usr/local/bin/
 
       - name: argocd login
+        env:
+          ARGOCD_PASSWORD: ${{ '${{ secrets.ARGOCD_PASSWORD }}' }}
+          ARGOCD_AUTH_TOKEN: ${{ '${{ secrets.ARGOCD_AUTH_TOKEN }}' }}
         shell: bash
         run: |
           # Uses existing kubeconfig on the self-hosted runner
@@ -65,27 +87,35 @@ jobs:
           else
             ARGOSRV="argocd-server.argocd"
           fi
-          argocd login "$ARGOSRV" \
-            --insecure \
-            --grpc-web \
-            --username admin \
-            --password "${{ secrets.ARGOCD_PASSWORD }}"
+          # Non-interactive login (avoid empty password / TTY prompt)
+          if [ -n "${ARGOCD_AUTH_TOKEN:-}" ]; then
+            argocd login "$ARGOSRV" --insecure --grpc-web --auth-token "$ARGOCD_AUTH_TOKEN"
+          elif [ -n "${ARGOCD_PASSWORD:-}" ]; then
+            argocd login "$ARGOSRV" --insecure --grpc-web --username admin --password "$ARGOCD_PASSWORD"
+          else
+            echo "ERROR: Set ARGOCD_AUTH_TOKEN or ARGOCD_PASSWORD secret." >&2
+            exit 1
+          fi
 
       - name: Ensure argocd repo and app
+        env:
+          GH_PAT: ${{ '${{ secrets.AUTH_GITHUB_TOKEN }}' }}
         shell: bash
         run: |
-
           # Connects the argocd repo
-          repo="https://github.com/obilotiti-com/${{values.app_name}}.git"
-          argocd repo list | grep -q $repo || argocd repo add $repo
+          repo="https://github.com/obilotiti-com/${{ values.app_name }}.git"
+          # If private, add with GitHub token so ArgoCD can pull
+          if ! argocd repo list | grep -q "$repo"; then
+            argocd repo add "$repo" --username x-access-token --password "$GH_PAT"
+          fi
 
           # Creates the argocd app
-          argocd app get ${{values.app_name}} || argocd app create ${{values.app_name}} \
-            --repo $repo \
-            --path charts/${{values.app_name}} \
-            --dest-namespace ${{values.app_env}} \
+          argocd app get ${{ values.app_name }} || argocd app create ${{ values.app_name }} \
+            --repo "$repo" \
+            --path charts/${{ values.app_name }} \
+            --dest-namespace ${{ values.app_env }} \
             --dest-server https://kubernetes.default.svc \
-            --values values-${{values.app_env}}.yaml \
+            --values values-${{ values.app_env }}.yaml \
             --revision master \
             --sync-policy manual \
             --sync-option CreateNamespace=true
@@ -93,5 +123,5 @@ jobs:
       - name: Argocd app sync
         shell: bash
         run: |
-          argocd app sync ${{values.app_name}}
-          argocd app wait ${{values.app_name}} --timeout 180
+          argocd app sync ${{ values.app_name }}
+          argocd app wait ${{ values.app_name }} --timeout 180
