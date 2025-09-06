@@ -42,7 +42,7 @@ def info():
 
 def health():
     # Do an actual check here
-    return jsonify({'status': 'up'}), 200
+    return jsonify({'status': 'up and working'}), 200
 
 
 @app.route('/images-front/<filename>')
