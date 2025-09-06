@@ -75,25 +75,28 @@ jobs:
           chmod +x argocd
           sudo mv argocd /usr/local/bin/
 
-      - name: argocd login
+      - name: Configure kubectl access
+        shell: bash
+        run: |
+          # Verify kubectl can access the cluster
+          kubectl cluster-info
+          kubectl get pods -n argocd
+
+      - name: argocd login with service account token
         env:
-          ARGOCD_PASSWORD: ${{ '${{ secrets.ARGOCD_PASSWORD }}' }}
           ARGOCD_AUTH_TOKEN: ${{ '${{ secrets.ARGOCD_AUTH_TOKEN }}' }}
         shell: bash
         run: |
-          # Uses existing kubeconfig on the self-hosted runner
-          if kubectl get svc argocd-server -n argocd &> /dev/null; then
-            ARGOSRV="argocd-server.argocd.svc.cluster.local"
+          # Use the service account token for in-cluster authentication
+          if [ -n "$ARGOCD_AUTH_TOKEN" ]; then
+            echo "Using auth token for ArgoCD login"
+            argocd login argocd-server.argocd.svc.cluster.local \
+              --insecure \
+              --grpc-web \
+              --auth-token "$ARGOCD_AUTH_TOKEN" \
+              --skip-test-tls
           else
-            ARGOSRV="argocd-server.argocd"
-          fi
-          # Non-interactive login (avoid empty password / TTY prompt)
-          if [ -n "${ARGOCD_AUTH_TOKEN:-}" ]; then
-            argocd login "$ARGOSRV" --insecure --grpc-web --auth-token "$ARGOCD_AUTH_TOKEN"
-          elif [ -n "${ARGOCD_PASSWORD:-}" ]; then
-            argocd login "$ARGOSRV" --insecure --grpc-web --username admin --password "$ARGOCD_PASSWORD"
-          else
-            echo "ERROR: Set ARGOCD_AUTH_TOKEN or ARGOCD_PASSWORD secret." >&2
+            echo "ERROR: ARGOCD_AUTH_TOKEN secret is required"
             exit 1
           fi
 
@@ -110,15 +113,17 @@ jobs:
           fi
 
           # Creates the argocd app
-          argocd app get ${{ values.app_name }} || argocd app create ${{ values.app_name }} \
-            --repo "$repo" \
-            --path charts/${{ values.app_name }} \
-            --dest-namespace ${{ values.app_env }} \
-            --dest-server https://kubernetes.default.svc \
-            --values values-${{ values.app_env }}.yaml \
-            --revision master \
-            --sync-policy manual \
-            --sync-option CreateNamespace=true
+          if ! argocd app get ${{ values.app_name }}; then
+            argocd app create ${{ values.app_name }} \
+              --repo "$repo" \
+              --path charts/${{ values.app_name }} \
+              --dest-namespace ${{ values.app_env }} \
+              --dest-server https://kubernetes.default.svc \
+              --values values-${{ values.app_env }}.yaml \
+              --revision master \
+              --sync-policy manual \
+              --sync-option CreateNamespace=true
+          fi
 
       - name: Argocd app sync
         shell: bash
