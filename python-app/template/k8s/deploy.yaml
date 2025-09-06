@@ -16,6 +16,6 @@ spec:
     spec:
       containers:
       - name: python-app
-        image: OBILOTITI22/python-app:v2
+        image: obilotiti/python-app:v2
         ports:
         - containerPort: 5000
